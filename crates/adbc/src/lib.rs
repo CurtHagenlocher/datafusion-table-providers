@@ -11,6 +11,7 @@
 // limitations under the License.
 pub mod conn;
 pub mod pool;
+pub mod scan_table;
 
 use crate::conn::AdbcDbConnection;
 use crate::pool::ADBCPool;

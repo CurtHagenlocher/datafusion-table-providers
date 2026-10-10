@@ -26,6 +26,11 @@ tracing = "0.1"
 secrecy = "0.10"
 sha2 = "0.11"
 
+[dev-dependencies]
+rust_xlsxwriter = "0.99"
+tempfile = "3"
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread"] }
+
 [features]
 default = ["federation"]
 federation = ["dep:datafusion-federation", "datafusion-table-providers-common/federation"]
