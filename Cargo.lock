@@ -4,19 +4,16 @@ version = 4
 
 [[package]]
 name = "adbc_core"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "365059b13a01bbf6f324b5bfe328232a819679731431f78105e2883256236858"
+version = "0.25.0"
 dependencies = [
  "arrow-array",
+ "arrow-buffer",
  "arrow-schema",
 ]
 
 [[package]]
 name = "adbc_driver_manager"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aac8bb789ff1f493bcb5d423c65b7a1b21ba5516f5e60797b4e1c64b34a2b61"
+version = "0.25.0"
 dependencies = [
  "adbc_core",
  "adbc_ffi",
@@ -32,9 +29,7 @@ dependencies = [
 
 [[package]]
 name = "adbc_ffi"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12cdef84c12e9e8858b300440c36ca94ba24fb2e188175251dc39bb44ba3584e"
+version = "0.25.0"
 dependencies = [
  "adbc_core",
  "arrow-array",
@@ -2550,9 +2545,11 @@ dependencies = [
  "futures",
  "r2d2",
  "r2d2_adbc",
+ "rust_xlsxwriter",
  "secrecy",
  "sha2 0.11.0",
  "snafu",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -4183,7 +4180,7 @@ dependencies = [
  "tar",
  "ureq",
  "vcpkg",
- "zip",
+ "zip 6.0.0",
 ]
 
 [[package]]
@@ -6244,6 +6241,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust_xlsxwriter"
+version = "0.99.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34f2d2cda7223168a14fb86bc7411dbc3379bd7d49749ecc53b91ed98585b6b0"
+dependencies = [
+ "zip 8.6.0",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7598,6 +7604,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "typed-path"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
+
+[[package]]
 name = "typenum"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8618,6 +8630,20 @@ dependencies = [
  "flate2",
  "indexmap",
  "memchr",
+ "zopfli",
+]
+
+[[package]]
+name = "zip"
+version = "8.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "indexmap",
+ "memchr",
+ "typed-path",
  "zopfli",
 ]
 

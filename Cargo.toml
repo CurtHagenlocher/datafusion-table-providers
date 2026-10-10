@@ -61,3 +61,10 @@ datafusion-table-providers-oracle = { version = "0.13.1", path = "crates/oracle"
 duckdb = { version = "=1.10505.0" }
 adbc_core = { version = "0.25" }
 adbc_driver_manager = { version = "0.25" }
+
+# LOCAL PROTOTYPE ONLY (file-driver proposal): build against the unreleased
+# ADBC 1.2 work in a local arrow-adbc checkout. Drop before any upstream PR.
+[patch.crates-io]
+adbc_core = { path = "C:/src/GitHub/arrow-adbc-2/rust/core" }
+adbc_driver_manager = { path = "C:/src/GitHub/arrow-adbc-2/rust/driver_manager" }
+adbc_ffi = { path = "C:/src/GitHub/arrow-adbc-2/rust/ffi" }
