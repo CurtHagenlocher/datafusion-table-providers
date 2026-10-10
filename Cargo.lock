@@ -37,6 +37,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "adbc_filesystem_zip"
+version = "0.25.0"
+dependencies = [
+ "adbc_core",
+ "arrow-array",
+ "zip 8.6.0",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2535,6 +2544,7 @@ version = "0.13.1"
 dependencies = [
  "adbc_core",
  "adbc_driver_manager",
+ "adbc_filesystem_zip",
  "arrow",
  "arrow-schema",
  "async-stream",
@@ -2552,6 +2562,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "zip 8.6.0",
 ]
 
 [[package]]

@@ -27,7 +27,10 @@ secrecy = "0.10"
 sha2 = "0.11"
 
 [dev-dependencies]
+# LOCAL PROTOTYPE ONLY: the ZIP provider from the local arrow-adbc checkout.
+adbc_filesystem_zip = { path = "C:/src/GitHub/arrow-adbc-2/rust/filesystem/zip" }
 rust_xlsxwriter = "0.99"
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
 tempfile = "3"
 tokio = { version = "1.52", features = ["macros", "rt-multi-thread"] }
 
