@@ -155,3 +155,54 @@ async fn count_and_filter() {
         500
     );
 }
+
+async fn plan_of(ctx: &SessionContext, sql: &str) -> String {
+    let plan = ctx
+        .sql(sql)
+        .await
+        .unwrap()
+        .create_physical_plan()
+        .await
+        .unwrap();
+    let text = displayable(plan.as_ref()).indent(true).to_string();
+    text
+}
+
+async fn count(ctx: &SessionContext, sql: &str) -> i64 {
+    let batches: Vec<RecordBatch> = ctx.sql(sql).await.unwrap().collect().await.unwrap();
+    batches[0].column(0).as_primitive::<Int64Type>().value(0)
+}
+
+#[tokio::test]
+async fn filters_are_pushed_to_the_driver() {
+    let Some(setup) = setup().await else {
+        return;
+    };
+    let ctx = &setup.ctx;
+
+    // Both conjuncts are exact: the driver filters, DataFusion does not.
+    let sql = "SELECT COUNT(*) FROM orders WHERE id >= 3500 AND id < 4000";
+    let plan = plan_of(ctx, sql).await;
+    assert!(plan.contains("filters=["), "{plan}");
+    assert!(!plan.contains("FilterExec"), "{plan}");
+    assert_eq!(count(ctx, sql).await, 500);
+
+    // Three-valued logic and OR, still exact.
+    let sql = "SELECT COUNT(*) FROM orders WHERE NOT (qty > 2 OR sku = 'S-1')";
+    assert!(!plan_of(ctx, sql).await.contains("FilterExec"));
+    let expected = (0..5000i64)
+        .filter(|id| !(id % 5 + 1 > 2 || id % 3 == 1))
+        .count() as i64;
+    assert_eq!(count(ctx, sql).await, expected);
+
+    // LIKE is not something the driver evaluates: it stays in DataFusion,
+    // while the comparison is still pushed down.
+    let sql = "SELECT COUNT(*) FROM orders WHERE qty > 2 AND sku LIKE '%-2'";
+    let plan = plan_of(ctx, sql).await;
+    assert!(plan.contains("FilterExec"), "{plan}");
+    assert!(plan.contains("filters=[qty > Int64(2)]"), "{plan}");
+    let expected = (0..5000i64)
+        .filter(|id| id % 5 + 1 > 2 && id % 3 == 2)
+        .count() as i64;
+    assert_eq!(count(ctx, sql).await, expected);
+}

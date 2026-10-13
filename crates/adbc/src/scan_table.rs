@@ -18,8 +18,10 @@
 //! [AdbcDBTable](crate::sql_table::AdbcDBTable), which unparses the plan to
 //! SQL, this provider describes each scan with statement options and reads
 //! it through `ExecutePartitions` / `ReadPartition`, one DataFusion
-//! partition per ADBC partition. Projection and limit are pushed down;
-//! filters are left to DataFusion.
+//! partition per ADBC partition. Projection, limit, and filters are pushed
+//! down. Filters travel as one Substrait `ExtendedExpression` with one
+//! expression per conjunct; the driver says which conjuncts it applies
+//! exactly, and DataFusion re-applies the rest.
 //!
 //! The statement options follow the prototype convention of the file-driver
 //! proposal (`adbc.file.*`); they are not yet part of the ADBC spec.
@@ -30,10 +32,13 @@ use adbc_core::options::{OptionStatement, OptionValue};
 use adbc_core::{Connection, Database, Optionable, Statement};
 use async_trait::async_trait;
 use datafusion::arrow::array::{RecordBatch, RecordBatchOptions};
-use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
 use datafusion::catalog::Session;
+use datafusion::common::tree_node::{Transformed, TreeNode};
+use datafusion::common::{Column, DFSchema};
 use datafusion::datasource::TableProvider;
 use datafusion::error::{DataFusionError, Result};
+use datafusion::execution::session_state::{SessionState, SessionStateBuilder};
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datafusion::physical_expr::EquivalenceProperties;
@@ -43,6 +48,8 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     SendableRecordBatchStream,
 };
+use datafusion_substrait::logical_plan::producer::to_substrait_extended_expr;
+use prost::Message;
 
 /// Statement option: the object to scan (a sheet, dataset, file, ...).
 pub const OPTION_TARGET: &str = "adbc.file.target";
@@ -50,6 +57,12 @@ pub const OPTION_TARGET: &str = "adbc.file.target";
 pub const OPTION_COLUMNS: &str = "adbc.file.columns";
 /// Statement option: the maximum number of rows to return.
 pub const OPTION_LIMIT: &str = "adbc.file.limit";
+/// Statement option (bytes): a Substrait `ExtendedExpression` whose
+/// expressions are the conjuncts of a filter.
+pub const OPTION_FILTER: &str = "adbc.file.filter";
+/// Statement option (read back after setting the filter): per conjunct,
+/// `"exact"`, `"inexact"`, or `"unsupported"`, as a JSON array.
+pub const OPTION_FILTER_PUSHDOWN: &str = "adbc.file.filter.pushdown";
 
 fn adbc_error(error: adbc_core::error::Error) -> DataFusionError {
     DataFusionError::External(Box::new(error))
@@ -73,6 +86,8 @@ pub struct AdbcScanTable<D> {
     database: Arc<D>,
     target: String,
     schema: SchemaRef,
+    /// For encoding filters as Substrait.
+    state: SessionState,
 }
 
 impl<D> std::fmt::Debug for AdbcScanTable<D> {
@@ -104,7 +119,53 @@ where
             database,
             target,
             schema: Arc::new(schema),
+            state: SessionStateBuilder::new().build(),
         })
+    }
+
+    /// Encode filters as one `ExtendedExpression`, one expression each,
+    /// over the table's schema.
+    fn encode_filters(&self, filters: &[&Expr]) -> Result<Vec<u8>> {
+        let schema = Arc::new(DFSchema::try_from(self.schema.as_ref().clone())?);
+        // The engine may qualify columns with the table's alias; the base
+        // schema is unqualified.
+        let filters = filters
+            .iter()
+            .map(|f| {
+                (*f).clone()
+                    .transform(|e| {
+                        Ok(match e {
+                            Expr::Column(c) if c.relation.is_some() => {
+                                Transformed::yes(Expr::Column(Column::new_unqualified(c.name)))
+                            }
+                            e => Transformed::no(e),
+                        })
+                    })
+                    .map(|t| t.data)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let field = Field::new("filter", DataType::Boolean, true);
+        let pairs: Vec<(&Expr, &Field)> = filters.iter().map(|f| (f, &field)).collect();
+        let encoded = to_substrait_extended_expr(&pairs, &schema, &self.state)?;
+        Ok(encoded.encode_to_vec())
+    }
+
+    /// Ask the driver which conjuncts it applies. Support depends on the
+    /// expressions only, so this does no I/O beyond opening a connection.
+    fn ask_pushdown(&self, filter: Vec<u8>) -> adbc_core::error::Result<Vec<String>> {
+        let mut connection = self.database.new_connection()?;
+        let mut statement = connection.new_statement()?;
+        statement.set_option(
+            OptionStatement::Other(OPTION_TARGET.into()),
+            self.target.as_str().into(),
+        )?;
+        statement.set_option(
+            OptionStatement::Other(OPTION_FILTER.into()),
+            OptionValue::Bytes(filter),
+        )?;
+        let answer =
+            statement.get_option_string(OptionStatement::Other(OPTION_FILTER_PUSHDOWN.into()))?;
+        Ok(decode_json_strings(&answer))
     }
 }
 
@@ -125,19 +186,36 @@ where
         &self,
         filters: &[&Expr],
     ) -> Result<Vec<TableProviderFilterPushDown>> {
-        // Filter pushdown (Substrait ExtendedExpression, with exact/inexact
-        // reporting) is a later step of the proposal.
-        Ok(vec![
-            TableProviderFilterPushDown::Unsupported;
-            filters.len()
-        ])
+        let mut answer = vec![TableProviderFilterPushDown::Unsupported; filters.len()];
+        // Only conjuncts that Substrait can express are offered.
+        let offered: Vec<usize> = (0..filters.len())
+            .filter(|&i| self.encode_filters(&filters[i..=i]).is_ok())
+            .collect();
+        if offered.is_empty() {
+            return Ok(answer);
+        }
+        let encoded =
+            self.encode_filters(&offered.iter().map(|&i| filters[i]).collect::<Vec<_>>())?;
+        // A driver that does not take filters (an error setting the
+        // option) supports none of them.
+        let Ok(support) = self.ask_pushdown(encoded) else {
+            return Ok(answer);
+        };
+        for (&i, s) in offered.iter().zip(support) {
+            answer[i] = match s.as_str() {
+                "exact" => TableProviderFilterPushDown::Exact,
+                "inexact" => TableProviderFilterPushDown::Inexact,
+                _ => TableProviderFilterPushDown::Unsupported,
+            };
+        }
+        Ok(answer)
     }
 
     async fn scan(
         &self,
         _state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
+        filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let indices: Vec<usize> = match projection {
@@ -161,6 +239,13 @@ where
                 .collect()
         };
 
+        // Only the filters the driver accepted reach here.
+        let filter = if filters.is_empty() {
+            None
+        } else {
+            Some(self.encode_filters(&filters.iter().collect::<Vec<_>>())?)
+        };
+
         let partitions = {
             let database = Arc::clone(&self.database);
             let target = self.target.clone();
@@ -182,6 +267,12 @@ where
                         OptionValue::Int(limit as i64),
                     )?;
                 }
+                if let Some(filter) = filter {
+                    statement.set_option(
+                        OptionStatement::Other(OPTION_FILTER.into()),
+                        OptionValue::Bytes(filter),
+                    )?;
+                }
                 Ok(statement.execute_partitions()?.partitions)
             })
             .await?
@@ -191,6 +282,7 @@ where
             Arc::clone(&self.database),
             self.target.clone(),
             requested,
+            filters.iter().map(|f| f.to_string()).collect(),
             partitions,
             projected,
             indices.is_empty(),
@@ -203,6 +295,8 @@ pub struct AdbcScanExec<D> {
     database: Arc<D>,
     target: String,
     columns: Vec<String>,
+    /// The filters the driver applies, for EXPLAIN.
+    filters: Vec<String>,
     partitions: Arc<Vec<Vec<u8>>>,
     schema: SchemaRef,
     /// The scan feeds count(*): return rows without columns.
@@ -215,6 +309,7 @@ impl<D> AdbcScanExec<D> {
         database: Arc<D>,
         target: String,
         columns: Vec<String>,
+        filters: Vec<String>,
         partitions: Vec<Vec<u8>>,
         schema: SchemaRef,
         rows_only: bool,
@@ -229,6 +324,7 @@ impl<D> AdbcScanExec<D> {
             database,
             target,
             columns,
+            filters,
             partitions: Arc::new(partitions),
             schema,
             rows_only,
@@ -239,6 +335,11 @@ impl<D> AdbcScanExec<D> {
     /// The columns requested from the driver (for tests and EXPLAIN).
     pub fn columns(&self) -> &[String] {
         &self.columns
+    }
+
+    /// The filters the driver applies (for tests and EXPLAIN).
+    pub fn filters(&self) -> &[String] {
+        &self.filters
     }
 }
 
@@ -258,11 +359,13 @@ impl<D> DisplayAs for AdbcScanExec<D> {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
-            "AdbcScanExec: target={}, columns={:?}, partitions={}",
-            self.target,
-            self.columns,
-            self.partitions.len()
-        )
+            "AdbcScanExec: target={}, columns={:?}, ",
+            self.target, self.columns,
+        )?;
+        if !self.filters.is_empty() {
+            write!(f, "filters=[{}], ", self.filters.join(", "))?;
+        }
+        write!(f, "partitions={}", self.partitions.len())
     }
 }
 
@@ -342,6 +445,17 @@ where
         });
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
+}
+
+/// Decode a JSON array of plain strings (the pushdown answer).
+fn decode_json_strings(text: &str) -> Vec<String> {
+    text.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(',')
+        .map(|s| s.trim().trim_matches('"').to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// Encode names as a JSON array of strings.

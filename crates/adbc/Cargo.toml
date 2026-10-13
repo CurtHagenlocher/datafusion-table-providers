@@ -16,6 +16,9 @@ async-stream = "0.3"
 async-trait = "0.1"
 datafusion = { workspace = true, default-features = false, features = ["sql"] }
 datafusion-federation = { workspace = true, features = ["sql"], optional = true }
+# Filters for file drivers travel as Substrait ExtendedExpressions.
+datafusion-substrait = { version = "54.0" }
+prost = "0.14"
 datafusion-table-providers-common = { workspace = true }
 futures = "0.3"
 r2d2 = "0.8"
