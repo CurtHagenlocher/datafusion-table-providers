@@ -83,8 +83,17 @@ const BUCKET: &str = "adbc-demo";
 
 type Error = Box<dyn std::error::Error>;
 
+/// A library path from the environment, checked before it goes into a
+/// manifest (a pasted path can pick up a line break).
 fn env_path(name: &str) -> Result<String, Error> {
     let value = std::env::var(name).map_err(|_| format!("set {name} (see the example's docs)"))?;
+    let value = value.trim();
+    if value.chars().any(char::is_control) {
+        return Err(format!("{name} contains a line break or control character: {value:?}").into());
+    }
+    if !Path::new(value).is_file() {
+        return Err(format!("{name} does not name a file: {value}").into());
+    }
     Ok(value.replace('\\', "/"))
 }
 
@@ -242,13 +251,21 @@ shared = "{library}"
 }
 
 fn load_driver(drivers: &Path, name: &str) -> Result<ManagedDriver, Error> {
-    Ok(ManagedDriver::load_from_name(
+    ManagedDriver::load_from_name(
         name,
         None,
         AdbcVersion::V120,
         LOAD_FLAG_DEFAULT,
         Some(vec![drivers.to_path_buf()]),
-    )?)
+    )
+    .map_err(|e| {
+        // The message is the last attempt; every attempt is in the trace.
+        let mut message = format!("loading driver '{name}': {}", e.message);
+        for (key, value) in e.details.unwrap_or_default() {
+            message.push_str(&format!("\n{key}:\n{}", String::from_utf8_lossy(&value)));
+        }
+        message.into()
+    })
 }
 
 fn open(driver: &mut ManagedDriver, uri: &str) -> Result<Arc<ManagedDatabase>, Error> {
